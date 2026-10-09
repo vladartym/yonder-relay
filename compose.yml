@@ -1,0 +1,23 @@
+# The Yonder relay with HTTPS. Caddy gets a certificate for DOMAIN from Let's Encrypt, and forwards to the relay.
+# Put DOMAIN, and ROOMS if you want it, in a .env file next to this file. See README.md.
+name: yonder-relay
+
+services:
+  relay:
+    build: .
+    restart: unless-stopped
+    environment:
+      ROOMS: ${ROOMS:-}
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    command: caddy reverse-proxy --from ${DOMAIN:?Set DOMAIN in .env} --to relay:8080
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy:/data
+
+volumes:
+  caddy:
