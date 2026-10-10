@@ -1,35 +1,32 @@
 # Yonder relay
 
-The relay connects the Yonder bridge on your computer to the Yonder app on
-your phone. It forwards their frames. It is one file, `main.ts`, and it needs
-only [Bun](https://bun.sh).
+The relay passes the messages between your phone and your computer. It
+cannot read or change them.
 
-The phone and the bridge encrypt each frame end to end. The relay cannot read
-or change the frames, and it writes nothing to disk.
+Your phone and your computer encrypt each message end to end. The relay
+writes nothing to disk. It is one file, `main.ts`, and it needs only
+[Bun](https://bun.sh).
 
-Yonder uses our relay at `wss://relay.yonder.so`. Run this relay on your own
-server, and the connections of your phone do not go through our server.
+Yonder uses our relay at `wss://relay.yonder.so`. Run your own, and your
+messages do not go through our server.
 
-## What the relay sees, and why
+## What the relay sees
 
-- **The IP address of each connection.** The network needs it to send the
-  frames back. The relay does not log it, store it or send it anywhere.
-- **The time and the size of each frame.** The relay needs them only to
-  forward the frame, and it does not keep them.
-- **The secret token of your bridge.** The relay makes the room of your
-  computer from a hash of it, so that only your computer can be the host of
-  the room. A relay with the token can take the room, but it still cannot
-  read the frames.
-- **The app version and the model of each phone and computer, and a short ID
-  of each phone.** The relay uses them only for the statistics (see below).
+- **The IP address of each connection.** It does not log, keep or send it.
+- **The time and the size of each message.** It needs them only to forward
+  the message.
+- **The token of your computer.** The room of your computer is a hash of it.
+  A relay with the token can take the room, but it cannot read the messages.
+- **The app version and the model of each device, and a short ID of each
+  phone.** It uses them only for the statistics.
 
-The relay keeps all of this in memory while the connection is open, and
-forgets it when the connection closes.
+The relay keeps all of this in memory, and forgets it when the connection
+closes.
 
-## Run the relay
+## Run your own
 
-You need a server with Docker, and a DNS name that points to it. Open ports
-80 and 443.
+You need a server with Docker, a domain name that points to it, and the ports
+80 and 443 open.
 
 1. Clone this repository on the server.
 2. Make a `.env` file next to `compose.yml`:
@@ -46,27 +43,26 @@ You need a server with Docker, and a DNS name that points to it. Open ports
 
 4. Open `https://relay.example.com`. The page shows "Yonder relay".
 
-Caddy gets the HTTPS certificate. To run the relay without Docker, run
-`bun main.ts`. It listens on `PORT` (default `8080`), and you must put HTTPS
-in front of it.
+Caddy gets the HTTPS certificate. Without Docker, run `bun main.ts`. It
+listens on `PORT` (default `8080`). Put HTTPS in front of it.
 
-## Use the relay in Yonder
+## Use it in Yonder
 
-1. On your computer, open Yonder, then **Settings** > **Pair a phone**.
-2. Open the **Relay** tab.
-3. Type `wss://relay.example.com`, then click **Save**.
-4. Pair your phone again. The QR code holds the relay address.
+1. In Yonder on your computer, open **Settings** > **Pair a phone** >
+   **Relay**.
+2. Type `wss://relay.example.com`, then click **Save**.
+3. Pair your phone again. The QR code holds the address of the relay.
 
 **Use default** goes back to `wss://relay.yonder.so`.
 
-## Let only your computers connect
+## Allow only your computers
 
-Without `ROOMS`, each Yonder bridge that knows the address can use your
-relay. Each bridge still sees only its own encrypted frames.
+By default, any Yonder computer that knows the address can use your relay.
+Each one sees only its own messages.
 
-1. Open **Settings** > **Pair a phone** in Yonder. The **Pair** tab shows
-   the room of your computer, for example `room Xk2Fq9LmTz4WbN7pRd1VcA`.
-2. Add the room to `.env`. Use a comma between two or more rooms:
+1. In **Settings** > **Pair a phone**, the **Pair** tab shows the room of
+   your computer, such as `room Xk2Fq9LmTz4WbN7pRd1VcA`.
+2. Add the room to `.env`. Put a comma between the rooms:
 
    ```sh
    ROOMS=Xk2Fq9LmTz4WbN7pRd1VcA
@@ -76,17 +72,16 @@ relay. Each bridge still sees only its own encrypted frames.
 
 ## Statistics
 
-`main.ts` can send the open and the close of each connection to a statistics
-server, with the room, the app version, the model and the short ID of the
-phone. It sends nothing if `STATS_URL` is not set. `compose.yml` does not
-set it.
+With `STATS_URL` set, the relay sends the open and the close of each
+connection to that server: the room, the app version, the model and the short
+ID of the phone. `compose.yml` does not set it, so your relay sends nothing.
 
-Our relay at `relay.yonder.so` sends these events to yonder.so, with the
-country, the city and the map position of the city that Cloudflare finds from
-the IP address. We use them to count usage and to find problems. They do not
-contain the IP address. See the [privacy policy](https://yonder.so/privacy/).
-The relay behind Caddy gets no country or city, because only Cloudflare adds
-them.
+Our relay sends these events to yonder.so, with the country, the city and its
+map position that Cloudflare finds from the IP address. The events never hold
+the IP address. We use them to count the usage and to find problems. See the
+[privacy policy](https://yonder.so/privacy/).
+
+Behind Caddy, the relay gets no country or city. Only Cloudflare adds them.
 
 ## License
 
