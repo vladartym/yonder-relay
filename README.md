@@ -1,7 +1,10 @@
 # Yonder relay
 
-The relay passes the messages between your phone and your computer. It
-cannot read or change them.
+[![The home page of Yonder at yonder.so](yonder.png)](https://yonder.so)
+
+[Yonder](https://yonder.so) lets you chat with the coding agents on your
+computer from your phone, or call them. The relay passes the messages between
+your phone and your computer. It cannot read or change them.
 
 Your phone and your computer encrypt each message end to end. The relay
 writes nothing to disk. It is one file, `main.ts`, and it needs only
