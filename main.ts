@@ -4,14 +4,20 @@
 //   /host?token=T  the bridge of a computer. Its room is a hash of its secret token.
 //   /phone?room=R  a phone. The relay gives each phone a number, so that more phones can use one computer.
 //   /privacy       the privacy policy of the phone app, for Google Play.
+//   /<id>/...      the Claude connector of a computer, such as https://tunnel.yonder.so/<id>/mcp, and the OAuth
+//                  discovery paths with the id inside, such as /.well-known/oauth-protected-resource/<id>/mcp. The relay
+//                  ends HTTPS for these requests, so it can read them. They are not end to end encrypted.
 // To the bridge, a binary frame starts with the number of the phone (4 bytes). Text frames are control
 // messages: {"open":n} and {"close":n} from the relay, {"close":n,"reason":"..."} and "ping" from the bridge.
+// A request of the connector is one text frame {"http":n,"method","path","origin","headers","body"}, and the bridge
+// answers with one text frame {"http":n,"status","headers","body"}. The bodies are text: the connector sends JSON,
+// forms and HTML only.
 import type { ServerWebSocket } from "bun";
 
 // seen: the time of the last ping of a bridge. device: the end of the public key of a phone, for the statistics.
 // place: where the socket came from, from the headers of Cloudflare. The relay never sends the IP address.
 type Place = { country?: string; city?: string; lat?: string; lon?: string };
-type Peer = { room: string; id: number; host: boolean; seen: number; device?: string; app?: string; model?: string; place: Place };
+type Peer = { room: string; id: number; host: boolean; seen: number; connector?: string; device?: string; app?: string; model?: string; place: Place };
 
 // The bridge pings every 3 seconds. A Mac that sleeps sends nothing, but its socket can stay open for minutes.
 // So a bridge with no ping for 15 seconds is offline, and the phones show it.
@@ -23,6 +29,16 @@ export async function roomOf(token: string) {
   const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token)));
   return btoa(String.fromCharCode(...hash.subarray(0, 16))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
+
+// The id of the Claude connector of a computer, in its address. It is also a hash of the token, so only the bridge with
+// the token can take it, but not the room, so a phone that knows the room does not know the address. connectorOf in
+// bridge/relay.ts of Yonder makes the same hash.
+export const connectorOf = (token: string) => roomOf(`connector:${token}`);
+const CONNECTOR = /^\/(?:([\w-]{22})(?:\/.*)?|\.well-known\/[\w-]+\/([\w-]{22})(?:\/.*)?)$/;
+const CONNECTOR_TIME = 60_000;
+// The headers of Cloudflare and of the proxy stay on the relay. The bridge sees the request as the client sent it.
+const LOCAL = /^(host|connection|content-length|transfer-encoding|keep-alive|upgrade|cdn-loop|true-client-ip|x-real-ip|x-forwarded-|cf-)/;
+const text = (status: number, body: string) => new Response(body, { status, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
 
 // STATS_URL and STATS_TOKEN send the open and the close of each socket to a statistics server, for Yonder the
 // site yonder.so (POST /api/relay/events). Without STATS_URL, the relay sends nothing. A failure never stops the relay.
@@ -50,17 +66,38 @@ export function serveRelay(port: number, { rooms, tap, silent = SILENT }: { room
   const hosts = new Map<string, ServerWebSocket<Peer>>();
   const phones = new Map<number, ServerWebSocket<Peer>>();
   const phonesOf = (room: string) => [...phones.values()].filter((p) => p.data.room === room);
+  // The room of each connector id, and the requests of the connectors that wait for the answer of their bridge.
+  const connectors = new Map<string, string>();
+  const waiting = new Map<number, { room: string; done: (res: Response) => void }>();
   // The bridge of the room, if it pinged in time.
   const live = (room: string) => {
     const host = hosts.get(room);
     return host && Date.now() - host.data.seen < silent ? host : undefined;
   };
   let next = 0;
+  // A request of a Claude connector goes to its bridge over the open socket of the bridge, so it needs no new
+  // connection to the computer.
+  async function forward(id: string, req: Request, url: URL) {
+    const room = connectors.get(id);
+    const mac = room && live(room);
+    if (!room || !mac) return text(503, "The computer of this connector is offline. Open Yonder on it, then try again.");
+    const n = ++next;
+    const headers = Object.fromEntries([...req.headers].filter(([k]) => !LOCAL.test(k)));
+    const body = req.method === "GET" || req.method === "HEAD" ? "" : await req.text();
+    return new Promise<Response>((resolve) => {
+      const timer = setTimeout(() => done(text(504, "The computer did not answer in time.")), CONNECTOR_TIME);
+      const done = (res: Response) => (clearTimeout(timer), waiting.delete(n), resolve(res));
+      waiting.set(n, { room, done });
+      mac.send(JSON.stringify({ http: n, method: req.method, path: url.pathname + url.search, origin: `https://${req.headers.get("host")}`, headers, body }));
+    });
+  }
   return Bun.serve<Peer>({
     port,
     async fetch(req, server) {
       const url = new URL(req.url);
       if (url.pathname === "/privacy") return new Response(Bun.file(new URL("privacy.html", import.meta.url)));
+      const c = url.pathname.match(CONNECTOR);
+      if (c) return forward(c[1] ?? c[2], req, url);
       const host = url.pathname === "/host";
       if (!host && url.pathname !== "/phone") return new Response("Yonder relay", { status: url.pathname === "/" ? 200 : 404 });
       const token = url.searchParams.get("token") ?? "";
@@ -72,7 +109,7 @@ export function serveRelay(port: number, { rooms, tap, silent = SILENT }: { room
       const model = url.searchParams.get("model")?.slice(0, 80) || undefined;
       const h = (name: string) => req.headers.get(name) || undefined;
       const place = { country: h("cf-ipcountry"), city: h("cf-ipcity"), lat: h("cf-iplatitude"), lon: h("cf-iplongitude") };
-      const data = { room, id: ++next, host, seen: Date.now(), device, app, model, place };
+      const data = { room, id: ++next, host, seen: Date.now(), connector: host ? await connectorOf(token) : undefined, device, app, model, place };
       return server.upgrade(req, { data }) ? undefined : new Response("Use a WebSocket", { status: 426 });
     },
     websocket: {
@@ -88,6 +125,7 @@ export function serveRelay(port: number, { rooms, tap, silent = SILENT }: { room
           // The bridge connects again after a drop. The phones then start new sessions with it.
           const old = hosts.get(room);
           hosts.set(room, ws);
+          connectors.set(ws.data.connector!, room);
           stat(room, { event: "open", role: "host", key: id, app, model, ...place });
           old?.close(4000, "Another bridge took the room");
           for (const p of phonesOf(room)) p.close(4004, "The Mac connected again");
@@ -120,7 +158,10 @@ export function serveRelay(port: number, { rooms, tap, silent = SILENT }: { room
           ws.send("pong");
         } else {
           try {
-            const { close, reason } = JSON.parse(msg);
+            const { close, reason, http, status, headers, body } = JSON.parse(msg);
+            // Only the bridge of the room answers a request of its connector.
+            const req = waiting.get(http);
+            if (req?.room === room) req.done(new Response(body ?? "", { status, headers: Object.entries(headers ?? {}).filter(([k]) => !LOCAL.test(k)) as [string, string][] }));
             const phone = phones.get(close);
             if (phone?.data.room === room) phone.close(4003, String(reason ?? "Closed by the Mac").slice(0, 120));
           } catch {}
@@ -137,6 +178,8 @@ export function serveRelay(port: number, { rooms, tap, silent = SILENT }: { room
           stat(room, { event: "close", role: "host", key: id, code, reason: reason.slice(0, 120) });
           if (hosts.get(room) !== ws) return;
           hosts.delete(room);
+          connectors.delete(ws.data.connector!);
+          for (const req of waiting.values()) if (req.room === room) req.done(text(502, "The computer went offline."));
           for (const p of phonesOf(room)) p.close(4004, "The Mac is offline");
         }
       },

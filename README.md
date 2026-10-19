@@ -4,7 +4,9 @@
 
 [Yonder](https://yonder.so) lets you chat with the coding agents on your
 computer from your phone, or call them. The relay passes the messages between
-your phone and your computer. It cannot read or change them.
+your phone and your computer. It cannot read or change them. It also passes
+the requests of the Claude app to your computer, as "What the relay sees"
+tells.
 
 Your phone and your computer encrypt each message end to end. The relay
 writes nothing to disk. It is one file, `main.ts`, and it needs only
@@ -22,6 +24,13 @@ messages do not go through our server.
   A relay with the token can take the room, but it cannot read the messages.
 - **The app version and the model of each device, and a short ID of each
   phone.** It uses them only for the statistics.
+- **The requests of a Claude connector.** The Claude app on the web, the
+  phone or the desktop can use the tools of Yonder through an address such
+  as `https://tunnel.yonder.so/<id>/mcp`. Claude's servers cannot encrypt
+  end to end, so the relay ends HTTPS for these requests and passes each one
+  to your computer over the connection that your computer keeps open. The
+  relay can read these requests and their answers. It does not log or keep
+  them. Your computer checks the token of each request.
 
 The relay keeps all of this in memory, and forgets it when the connection
 closes.
