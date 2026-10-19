@@ -36,6 +36,8 @@ export async function roomOf(token: string) {
 export const connectorOf = (token: string) => roomOf(`connector:${token}`);
 const CONNECTOR = /^\/(?:([\w-]{22})(?:\/.*)?|\.well-known\/[\w-]+\/([\w-]{22})(?:\/.*)?)$/;
 const CONNECTOR_TIME = 60_000;
+// A request of a connector is a few KB of JSON. The relay keeps each body in memory, so a larger one gets 413.
+const CONNECTOR_BODY = 1 << 20;
 // The headers of Cloudflare and of the proxy stay on the relay. The bridge sees the request as the client sent it.
 const LOCAL = /^(host|connection|content-length|transfer-encoding|keep-alive|upgrade|cdn-loop|true-client-ip|x-real-ip|x-forwarded-|cf-)/;
 const text = (status: number, body: string) => new Response(body, { status, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
@@ -93,6 +95,7 @@ export function serveRelay(port: number, { rooms, tap, silent = SILENT }: { room
   }
   return Bun.serve<Peer>({
     port,
+    maxRequestBodySize: CONNECTOR_BODY,
     async fetch(req, server) {
       const url = new URL(req.url);
       if (url.pathname === "/privacy") return new Response(Bun.file(new URL("privacy.html", import.meta.url)));
