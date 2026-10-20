@@ -1,0 +1,41 @@
+# Deploys the relay to the server of relay.yonder.so, on each push to main that
+# changes main.ts, Dockerfile or privacy.html. A deploy restarts the relay, so
+# each Mac and phone that uses it connects again.
+#
+# The key in DEPLOY_SSH_KEY can run one command on that server, which loads the
+# image and restarts the relay with the compose.yml and the .env that are
+# already there. It refuses an archive that names another image. DEPLOY_HOST and
+# DEPLOY_KNOWN_HOSTS name the server.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    paths: ['main.ts', 'Dockerfile', 'privacy.html']
+  workflow_dispatch:
+
+concurrency: deploy
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write the SSH key
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+
+      - name: Build the image
+        run: docker build -t yonder-relay-yonder-relay .
+
+      - name: Load it on the server and restart
+        run: docker save yonder-relay-yonder-relay:latest | gzip | ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "root@$DEPLOY_HOST" image-deploy
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
