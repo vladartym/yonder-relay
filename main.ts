@@ -40,6 +40,11 @@ const CONNECTOR_TIME = 60_000;
 const CONNECTOR_BODY = 1 << 20;
 // The headers of Cloudflare and of the proxy stay on the relay. The bridge sees the request as the client sent it.
 const LOCAL = /^(host|connection|content-length|transfer-encoding|keep-alive|upgrade|cdn-loop|true-client-ip|x-real-ip|x-forwarded-|cf-)/;
+// Anyone can connect a bridge, and the answers of its connector come from the domain of the relay, such as yonder.so.
+// So an answer sets and clears no cookie, and runs no script. It gets the policy of the page of the code (form in
+// bridge/remote.ts of Yonder).
+const UNSAFE = /^(set-cookie|clear-site-data|content-security-policy)$/i;
+const CSP = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'";
 const text = (status: number, body: string) => new Response(body, { status, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
 
 // STATS_URL and STATS_TOKEN send the open and the close of each socket to a statistics server, for Yonder the
@@ -164,7 +169,10 @@ export function serveRelay(port: number, { rooms, tap, silent = SILENT }: { room
             const { close, reason, http, status, headers, body } = JSON.parse(msg);
             // Only the bridge of the room answers a request of its connector.
             const req = waiting.get(http);
-            if (req?.room === room) req.done(new Response(body ?? "", { status, headers: Object.entries(headers ?? {}).filter(([k]) => !LOCAL.test(k)) as [string, string][] }));
+            if (req?.room === room) {
+              const kept = Object.entries(headers ?? {}).filter(([k]) => !LOCAL.test(k) && !UNSAFE.test(k)) as [string, string][];
+              req.done(new Response(body ?? "", { status, headers: [...kept, ["content-security-policy", CSP]] }));
+            }
             const phone = phones.get(close);
             if (phone?.data.room === room) phone.close(4003, String(reason ?? "Closed by the Mac").slice(0, 120));
           } catch {}
