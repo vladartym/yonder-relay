@@ -17,7 +17,7 @@ import type { ServerWebSocket } from "bun";
 // seen: the time of the last ping of a bridge. device: the end of the public key of a phone, for the statistics.
 // place: where the socket came from, from the headers of Cloudflare. The relay never sends the IP address.
 type Place = { country?: string; city?: string; lat?: string; lon?: string };
-type Peer = { room: string; id: number; host: boolean; seen: number; connector?: string; device?: string; app?: string; model?: string; place: Place };
+type Peer = { room: string; id: number; host: boolean; seen: number; connector?: string; device?: string; app?: string; model?: string; place: Place; ip: string };
 
 // The bridge pings every 3 seconds. A Mac that sleeps sends nothing, but its socket can stay open for minutes.
 // So a bridge with no ping for 15 seconds is offline, and the phones show it.
@@ -46,6 +46,23 @@ const LOCAL = /^(host|connection|content-length|transfer-encoding|keep-alive|upg
 const UNSAFE = /^(set-cookie|clear-site-data|content-security-policy)$/i;
 const CSP = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'";
 const text = (status: number, body: string) => new Response(body, { status, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
+// Many open connections must not fill the memory of the relay (256 MB on the server of Yonder). sockets: the open sockets
+// of one address. A home or a phone network puts many devices behind one address, and the end-to-end checks of Yonder
+// open many sockets from one Mac, so the limit is high. requests: the requests of all connectors that wait in memory,
+// each with a body of up to 1 MB. perConnector: the requests of one connector that wait.
+const LIMITS = { sockets: 100, requests: 64, perConnector: 16 };
+// Adds `by` to the count of `key`, and forgets the key at 0, so that the map holds only the keys in use.
+const count = (map: Map<string, number>, key: string, by: number) => {
+  const n = (map.get(key) ?? 0) + by;
+  n ? map.set(key, n) : map.delete(key);
+};
+// The key of an address for the limit of sockets. A client with IPv6 often has a whole /64, so the key is its first 4 groups.
+function addressKey(ip: string) {
+  if (!ip.includes(":") || ip.includes(".")) return ip;
+  const [head, tail = ""] = ip.toLowerCase().split("::");
+  const [a, b] = [head.split(":").filter(Boolean), tail.split(":").filter(Boolean)];
+  return [...a, ...Array(Math.max(0, 8 - a.length - b.length)).fill("0"), ...b].slice(0, 4).join(":");
+}
 
 // STATS_URL and STATS_TOKEN send the open and the close of each socket to a statistics server, for Yonder the
 // site yonder.so (POST /api/relay/events). Without STATS_URL, the relay sends nothing. A failure never stops the relay.
@@ -53,23 +70,34 @@ const text = (status: number, body: string) => new Response(body, { status, head
 // 15 seconds, the relay tries the event again after 1, 2, 4, 8 and 16 seconds. Before, a close lost in a deploy left
 // a phone online on the backstage until the Mac connected again.
 type Event = { event: "open" | "close" | "refused"; role: "host" | "phone"; key?: number; device?: string; app?: string; model?: string; code?: number; reason?: string } & Place;
+// The events wait in memory, in one queue for all rooms. A long outage of the site or a flood of sockets must not fill the
+// memory, so the relay drops each new event while STATS_QUEUE events wait.
+const STATS_QUEUE = 10_000;
 let sending = Promise.resolve();
+let queued = 0;
 function stat(mac: string, e: Event) {
-  if (!process.env.STATS_URL) return;
+  if (!process.env.STATS_URL || queued >= STATS_QUEUE) return;
+  queued++;
   const headers = { "content-type": "application/json", authorization: `Bearer ${process.env.STATS_TOKEN ?? ""}` };
   const body = JSON.stringify({ ...e, mac, at: Date.now() });
-  // ponytail: one queue for all rooms, so a long outage of the site delays each event; drop old events if that matters.
   sending = sending.then(async () => {
     for (let wait = 1000; ; wait *= 2) {
       const sent = await fetch(process.env.STATS_URL!, { method: "POST", headers, body, signal: AbortSignal.timeout(5000) }).then((r) => r.status < 500, () => false);
-      if (sent || wait > 16000) return;
+      if (sent || wait > 16000) break;
       await Bun.sleep(wait);
     }
+    queued--;
   });
 }
 
-// `rooms` keeps strangers off the relay: only these Macs can connect. `tap` sees each frame, for the check.
-export function serveRelay(port: number, { rooms, tap, silent = SILENT }: { rooms?: string[]; tap?: (frame: Uint8Array) => void; silent?: number } = {}) {
+// `rooms` keeps strangers off the relay: only these Macs can connect. `tap` sees each frame, for the check. The check
+// also sets low `limits`.
+export function serveRelay(port: number, { rooms, tap, silent = SILENT, limits = {} }: { rooms?: string[]; tap?: (frame: Uint8Array) => void; silent?: number; limits?: Partial<typeof LIMITS> } = {}) {
+  const max = { ...LIMITS, ...limits };
+  // The open sockets of each address key, and the waiting requests of all connectors and of each connector id.
+  const sockets = new Map<string, number>();
+  let pending = 0;
+  const pendingOf = new Map<string, number>();
   const hosts = new Map<string, ServerWebSocket<Peer>>();
   const phones = new Map<number, ServerWebSocket<Peer>>();
   const phonesOf = (room: string) => [...phones.values()].filter((p) => p.data.room === room);
@@ -88,16 +116,32 @@ export function serveRelay(port: number, { rooms, tap, silent = SILENT }: { room
     const room = connectors.get(id);
     const mac = room && live(room);
     if (!room || !mac) return text(503, "The computer of this connector is offline. Open Yonder on it, then try again.");
-    const n = ++next;
-    const headers = Object.fromEntries([...req.headers].filter(([k]) => !LOCAL.test(k)));
-    const body = req.method === "GET" || req.method === "HEAD" ? "" : await req.text();
-    return new Promise<Response>((resolve) => {
-      const timer = setTimeout(() => done(text(504, "The computer did not answer in time.")), CONNECTOR_TIME);
-      const done = (res: Response) => (clearTimeout(timer), waiting.delete(n), resolve(res));
-      waiting.set(n, { room, done });
-      mac.send(JSON.stringify({ http: n, method: req.method, path: url.pathname + url.search, origin: `https://${req.headers.get("host")}`, headers, body }));
-    });
+    // A request holds its place from the read of its body to the answer.
+    if (pending >= max.requests) return text(503, "The relay is busy. Try again in a minute.");
+    if ((pendingOf.get(id) ?? 0) >= max.perConnector) return text(429, "This connector has too many requests at the same time. Try again in a minute.");
+    pending++, count(pendingOf, id, 1);
+    try {
+      const n = ++next;
+      const headers = Object.fromEntries([...req.headers].filter(([k]) => !LOCAL.test(k)));
+      const body = req.method === "GET" || req.method === "HEAD" ? "" : await req.text();
+      return await new Promise<Response>((resolve) => {
+        const timer = setTimeout(() => done(text(504, "The computer did not answer in time.")), CONNECTOR_TIME);
+        const done = (res: Response) => (clearTimeout(timer), waiting.delete(n), resolve(res));
+        waiting.set(n, { room, done });
+        mac.send(JSON.stringify({ http: n, method: req.method, path: url.pathname + url.search, origin: `https://${req.headers.get("host")}`, headers, body }));
+      });
+    } finally {
+      pending--, count(pendingOf, id, -1);
+    }
   }
+  // docker stop sends SIGTERM, and kills the relay 10 seconds later. Before, the relay ignored SIGTERM, so a deploy sent no
+  // close to the statistics. Now the relay closes each bridge with 1001, which also closes its phones, and sends the closes.
+  if (import.meta.main)
+    process.once("SIGTERM", async () => {
+      for (const host of hosts.values()) host.close(1001, "The relay restarts");
+      await Promise.race([sending, Bun.sleep(8000)]);
+      process.exit(0);
+    });
   return Bun.serve<Peer>({
     port,
     maxRequestBodySize: CONNECTOR_BODY,
@@ -117,8 +161,14 @@ export function serveRelay(port: number, { rooms, tap, silent = SILENT }: { room
       const model = url.searchParams.get("model")?.slice(0, 80) || undefined;
       const h = (name: string) => req.headers.get(name) || undefined;
       const place = { country: h("cf-ipcountry"), city: h("cf-ipcity"), lat: h("cf-iplatitude"), lon: h("cf-iplongitude") };
-      const data = { room, id: ++next, host, seen: Date.now(), connector: host ? await connectorOf(token) : undefined, device, app, model, place };
-      return server.upgrade(req, { data }) ? undefined : new Response("Use a WebSocket", { status: 426 });
+      // Cloudflare, or the Caddy of compose.yml, sets cf-connecting-ip. The server of Yonder takes port 80 from Cloudflare only.
+      const ip = addressKey(h("cf-connecting-ip") ?? server.requestIP(req)?.address ?? "");
+      const data = { room, id: ++next, host, seen: Date.now(), connector: host ? await connectorOf(token) : undefined, device, app, model, place, ip };
+      // No await from here to the count, so that many sockets at the same time cannot pass the limit together.
+      const open = sockets.get(ip) ?? 0;
+      if (open >= max.sockets) return text(429, "Too many connections from this address.");
+      if (!server.upgrade(req, { data })) return new Response("Use a WebSocket", { status: 426 });
+      sockets.set(ip, open + 1);
     },
     websocket: {
       // An image from the phone is 20 MB at most, and a long conversation is a few MB.
@@ -134,7 +184,7 @@ export function serveRelay(port: number, { rooms, tap, silent = SILENT }: { room
           const old = hosts.get(room);
           hosts.set(room, ws);
           connectors.set(ws.data.connector!, room);
-          stat(room, { event: "open", role: "host", key: id, app, model, ...place });
+          stat(room, { event: "open", role: "host", key: id, device, app, model, ...place });
           old?.close(4000, "Another bridge took the room");
           for (const p of phonesOf(room)) p.close(4004, "The Mac connected again");
         } else if (!live(room)) {
@@ -179,7 +229,9 @@ export function serveRelay(port: number, { rooms, tap, silent = SILENT }: { room
         }
       },
       close(ws, code, reason) {
-        const { room, id, host } = ws.data;
+        const { room, id, host, ip } = ws.data;
+        // First, also for a refused phone, so that a Mac that knocks on an old room often is not locked out.
+        count(sockets, ip, -1);
         if (!host) {
           // A refused phone was never in `phones`, and its refusal is already in the statistics.
           if (!phones.delete(id)) return;

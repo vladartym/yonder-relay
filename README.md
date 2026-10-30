@@ -17,7 +17,8 @@ messages do not go through our server.
 
 ## What the relay sees
 
-- **The IP address of each connection.** It does not log, keep or send it.
+- **The IP address of each connection.** It counts the open connections of
+  each address, to limit them. It does not log or send it.
 - **The time and the size of each message.** It needs them only to forward
   the message.
 - **The token of your computer.** The room of your computer is a hash of it.
@@ -56,7 +57,9 @@ You need a server with Docker, a domain name that points to it, and the ports
 4. Open `https://relay.example.com`. The page shows "Yonder relay".
 
 Caddy gets the HTTPS certificate. Without Docker, run `bun main.ts`. It
-listens on `PORT` (default `8080`). Put HTTPS in front of it.
+listens on `PORT` (default `8080`). Put HTTPS in front of it, and set the
+header `Cf-Connecting-Ip` to the address of the client there. The relay
+limits the open connections of each address with it.
 
 ## Use it in Yonder
 

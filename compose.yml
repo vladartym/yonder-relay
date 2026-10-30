@@ -12,7 +12,9 @@ services:
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
-    command: caddy reverse-proxy --from ${DOMAIN:?Set DOMAIN in .env} --to relay:8080
+    # The relay limits the open connections of each address. It reads the address from Cf-Connecting-Ip, so Caddy sets
+    # it. Without this, a client could send its own.
+    command: 'caddy reverse-proxy --from ${DOMAIN:?Set DOMAIN in .env} --to relay:8080 --header-up "Cf-Connecting-Ip: {http.request.remote.host}"'
     ports:
       - "80:80"
       - "443:443"
